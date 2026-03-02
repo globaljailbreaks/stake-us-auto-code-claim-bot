@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict
 
-from playwright.async_api import async_playwright, BrowserContext, Page
+from playwright.async_api import async_playwright, BrowserContext, Page, Locator
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -20,7 +20,7 @@ from telegram.ext import (
 # ────────────────────────────────────────────────
 # CONFIG – YOUR VALUES LOCKED IN
 BOT_TOKEN = "8630645115:AAFr7FlWLecuHFjvzs4dwWViVJWhGeZzWbg"
-ADMIN_IDS = [8196946430]  # only you control it
+ADMIN_IDS = [8196946430]
 ACCOUNTS_FILE = Path("accounts.json")
 CODES_QUEUE: List[str] = []
 CLAIM_LOG: List[Dict] = []
@@ -34,14 +34,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("⛔ Unauthorized.")
         return
     await update.message.reply_text(
-        "🔥 Stake.us Code Claimer Bot – Proxy-Free 2026 Edition 🔥\n\n"
+        "🔥 Stake.us Code Claimer Bot – Username Login Edition 2026 🔥\n\n"
         "Commands:\n"
         "/addcode <CODE>          → queue single code\n"
-        "/addcodes                → reply to message with code list\n"
+        "/addcodes                → reply with code list\n"
         "/status                  → queue + recent logs\n"
         "/claimnow                → force start claiming\n"
-        "/accounts                → check or update accounts.json via GitLab\n\n"
-        "No proxies – using Railway outbound IP. Rotate deployment if banned."
+        "/accounts                → check accounts.json in GitLab\n\n"
+        "Login now uses username + password (Stake.us 2026 format)."
     )
 
 async def add_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -52,24 +52,24 @@ async def add_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     code = context.args[0].strip().upper()
     if code not in CODES_QUEUE:
         CODES_QUEUE.append(code)
-        await update.message.reply_text(f"✅ Added: {code}  (queue now {len(CODES_QUEUE)})")
+        await update.message.reply_text(f"✅ Added: {code}  (queue: {len(CODES_QUEUE)})")
     else:
-        await update.message.reply_text(f"🔄 {code} already queued.")
+        await update.message.reply_text(f"🔄 Already queued: {code}")
 
 async def add_codes_bulk(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id not in ADMIN_IDS: return
     if not update.message.reply_to_message or not update.message.reply_to_message.text:
-        await update.message.reply_text("Reply to a message containing codes with /addcodes")
+        await update.message.reply_text("Reply to message with codes → /addcodes")
         return
     text = update.message.reply_to_message.text
-    codes = [c.strip().upper() for c in text.splitlines() + text.split() if 5 <= len(c.strip()) <= 15 and c.strip().isalnum()]
+    codes = [c.strip().upper() for c in text.split() if 5 <= len(c.strip()) <= 15 and c.strip().isalnum()]
     new_codes = [c for c in set(codes) if c not in CODES_QUEUE]
     CODES_QUEUE.extend(new_codes)
-    await update.message.reply_text(f"🚀 Added {len(new_codes)} new codes. Queue size: {len(CODES_QUEUE)}")
+    await update.message.reply_text(f"🚀 Added {len(new_codes)} new codes. Queue: {len(CODES_QUEUE)}")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id not in ADMIN_IDS: return
-    msg = f"📊 Status\nQueue: {len(CODES_QUEUE)} codes pending\n\nLast 10 claims:\n"
+    msg = f"📊 Status\nPending codes: {len(CODES_QUEUE)}\n\nLast 10 claims:\n"
     for entry in CLAIM_LOG[-10:]:
         t = entry["time"]
         acc = entry["account"][:8] + "..."
@@ -83,11 +83,11 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def claim_codes() -> None:
     global CODES_QUEUE, CLAIM_LOG
     if not CODES_QUEUE:
-        logger.info("No codes in queue.")
+        logger.info("Queue empty – nothing to claim.")
         return
 
     if not ACCOUNTS_FILE.exists():
-        logger.error("accounts.json missing!")
+        logger.error("accounts.json missing – cannot claim.")
         return
 
     with open(ACCOUNTS_FILE, 'r') as f:
@@ -95,75 +95,119 @@ async def claim_codes() -> None:
 
     async with async_playwright() as p:
         for acc in accounts:
-            email = acc["email"]
+            username = acc.get("username") or acc.get("email")  # fallback for old format
             password = acc["password"]
 
-            logger.info(f"Starting session for {email}")
+            if not username or not password:
+                logger.warning(f"Invalid account entry: {acc}")
+                continue
 
-            browser = await p.chromium.launch(headless=True)  # NO PROXY
+            logger.info(f"Claim session starting for {username}")
+
+            browser = await p.chromium.launch(headless=True)
             context: BrowserContext = await browser.new_context(
                 viewport={"width": 1920, "height": 1080},
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                 locale="en-US",
                 timezone_id="America/New_York",
-                # Add more stealth later if needed
             )
             page: Page = await context.new_page()
 
             try:
-                await page.goto("https://stake.us/", timeout=60000)
-                await page.wait_for_timeout(random.randint(4000, 9000))
+                await page.goto("https://stake.us/login", timeout=60000)
+                await page.wait_for_timeout(random.randint(4000, 8000))
 
-                # Login flow – update selectors if Stake changes UI
-                await page.click("text=Login", timeout=30000)
-                await page.fill('input[name="email"]', email)
-                await page.fill('input[name="password"]', password)
-                await page.click('button[type="submit"]')
-                await page.wait_for_url("**/dashboard**", timeout=60000)
+                # Handle cookie/age gate if present
+                try:
+                    await page.click("text=Accept All", timeout=10000)
+                except:
+                    pass
 
-                await page.goto("https://stake.us/account/promotions")
+                # Username login – 2026 Stake.us selectors
+                username_input: Locator = page.locator(
+                    'input[name="username"], input[placeholder*="Username"], input[autocomplete="username"]'
+                )
+                password_input: Locator = page.locator(
+                    'input[name="password"], input[type="password"], input[placeholder*="Password"]'
+                )
+                submit_btn: Locator = page.locator(
+                    'button[type="submit"], button:has-text("Login"), button:has-text("Sign In")'
+                )
+
+                if not await username_input.is_visible(timeout=15000):
+                    logger.warning(f"Username field not found for {username} – page may have changed")
+                    continue
+
+                # Simulate human typing
+                await username_input.click()
+                await username_input.type(username, delay=random.randint(80, 180))
+                await password_input.type(password, delay=random.randint(80, 180))
+
+                await submit_btn.click()
+                await page.wait_for_url("**/dashboard**", timeout=45000)
+
+                logger.info(f"Login success: {username}")
+
+                # Go to promotions
+                await page.goto("https://stake.us/account/promotions", timeout=30000)
+                await page.wait_for_timeout(random.randint(3000, 6000))
 
                 claimed = 0
                 for code in CODES_QUEUE.copy():
                     try:
-                        await page.fill('input[placeholder*="Enter code"], input[name*="promo"]', code)
-                        await page.click('button:has-text("Redeem"), button[type="submit"]')
-                        await page.wait_for_timeout(random.randint(5000, 12000))
+                        code_input = page.locator(
+                            'input[placeholder*="Enter code"], input[name*="promo"], input[id*="promo"]'
+                        )
+                        redeem_btn = page.locator(
+                            'button:has-text("Redeem"), button[type="submit"], button:has-text("Claim")'
+                        )
 
-                        success = await page.query_selector('text=success|bonus added|redeemed') is not None
-                        error = await page.inner_text('[class*="error"], [class*="toast-error"], [class*="alert"]') or "no message"
+                        await code_input.fill(code)
+                        await redeem_btn.click()
+                        await page.wait_for_timeout(random.randint(6000, 14000))
+
+                        success = await page.query_selector(
+                            'text=successfully|bonus added|redeemed|congrats|added to balance'
+                        ) is not None
+
+                        error_text = await page.inner_text(
+                            '[class*="error"], [class*="toast-error"], [class*="alert-danger"], [class*="notification-error"]'
+                        ) or "no error message visible"
 
                         CLAIM_LOG.append({
                             "time": datetime.utcnow().isoformat(),
-                            "account": email,
+                            "account": username,
                             "code": code,
                             "success": success,
-                            "message": error if not success else "claimed"
+                            "message": error_text if not success else "claimed successfully"
                         })
 
                         if success:
                             claimed += 1
                             CODES_QUEUE.remove(code)
+                            logger.info(f"Success: {username} claimed {code}")
                         else:
-                            if "rate limit" in error.lower() or "too many" in error.lower():
-                                logger.warning(f"Rate limit hit on {email} – stopping this account")
+                            logger.info(f"Fail: {username} → {code} → {error_text}")
+                            if "rate limit" in error_text.lower() or "too many" in error_text.lower():
+                                logger.warning(f"Rate limit detected – stopping account {username}")
                                 break
 
                     except Exception as e:
-                        logger.error(f"Claim error {code} on {email}: {e}")
+                        logger.error(f"Claim exception for {code} on {username}: {e}")
 
-                logger.info(f"{email} → claimed {claimed} codes")
+                logger.info(f"{username} finished – claimed {claimed} codes")
 
             except Exception as e:
-                logger.error(f"Full session crash for {email}: {e}")
+                logger.error(f"Session crash for {username}: {e}")
             finally:
                 await context.close()
                 await browser.close()
 
-            await asyncio.sleep(random.randint(180, 420))  # 3–7 min delay between accounts
+            # Delay between accounts – avoid detection
+            await asyncio.sleep(random.randint(180, 480))
 
 # ────────────────────────────────────────────────
-# WEBHOOK MODE FOR RAILWAY PERSISTENCE – NO POLLING
+# WEBHOOK MODE – RAILWAY PERSISTENCE
 # ────────────────────────────────────────────────
 
 async def webhook_main():
@@ -175,7 +219,6 @@ async def webhook_main():
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("claimnow", lambda u,c: asyncio.create_task(claim_codes())))
 
-    # Webhook setup – Railway provides PORT & domain
     await app.initialize()
     await app.start()
     await app.updater.start_webhook(
@@ -185,9 +228,8 @@ async def webhook_main():
         webhook_url=f"https://{os.environ['RAILWAY_PUBLIC_DOMAIN']}/{BOT_TOKEN}"
     )
 
-    logger.info(f"Webhook started on {os.environ.get('RAILWAY_PUBLIC_DOMAIN')}")
+    logger.info(f"Webhook active on {os.environ.get('RAILWAY_PUBLIC_DOMAIN')}")
 
-    # Keep alive forever
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
